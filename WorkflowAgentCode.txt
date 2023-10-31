@@ -1,0 +1,329 @@
+using Kofax.ACWFLib;
+using Kofax.DBLiteOpt;
+using System;
+using System.Collections.Generic;
+using System.Data.Odbc;
+using System.Linq;
+using System.Net.Mail;
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace WorkflowAgent_OEAdminCA
+{
+    [Guid("3E82BBD6-B5E6-4C58-8AA8-4F8D516A3209")]
+    [ClassInterface(ClassInterfaceType.None)]
+    [ProgId("WorkflowAgent_OEAdminCA.ControlBatches")]
+    public class ControlBatches : _IACWorkflowAgent
+    {
+        public string output { get; set; }
+
+        public void ProcessWorkflow(ref Kofax.ACWFLib.ACWorkflowData oWorkflowData)
+        {
+            output += "Current Module is: " + oWorkflowData.CurrentModule.ID + Environment.NewLine;
+
+            try
+            {
+                if (oWorkflowData.CurrentModule.ID == "kfxpdf.exe")
+                {
+                    bool isClassificationValid = ValidateClassification(ref oWorkflowData);
+                    output += "Classification Valid: " + isClassificationValid;
+                    if (isClassificationValid)
+                    {
+                        output += "Doc Review can be skipped" + Environment.NewLine;
+                        bool skipValidation = ValidateExtraction(ref oWorkflowData);
+                        if (skipValidation)
+                        {
+                            output += "inside the skipping module | Skipping Doc Review to export" + Environment.NewLine;
+                            SetNextModule(ref oWorkflowData, "release.exe");                            
+                        }
+                        else
+                        {
+                            output += "inside the skipping module | Skipping Doc Review to Validation" + Environment.NewLine;
+                            SetNextModule(ref oWorkflowData, "LCI.Validation");
+                            SendEmailNotification(new SendEmailNotificationRequest
+                            {
+                                Subject = "New Validation Job - Tenneco OEAdmin CA.",
+                                MessageBody = "Hi User <br/>, " +
+                                "You have a new job waiting to validate and process manually. Please <a href=''>Click Here</a> to open the job"
+                            });
+                        }
+                    }
+                    else
+                    {
+                        output += "Going into Doc Review" + Environment.NewLine;
+                        SendEmailNotification(new SendEmailNotificationRequest
+                        {
+                            Subject = "New Review Job - Tenneco OEAdmin CA.",
+                            MessageBody = "Hi User <br/>, " +
+                            "You have a new job waiting to review and process manually. Please <a href=''>Click Here</a> to open the job"
+                        });
+                    }
+                }
+                else if (oWorkflowData.CurrentModule.ID == "LCI.MailroomInst2")
+                {
+                    bool skipValidation = ValidateExtraction(ref oWorkflowData);
+                    if (skipValidation)
+                    {
+                        output += "inside the skipping module | Skipping Validation to export" + Environment.NewLine;
+                        SetNextModule(ref oWorkflowData, "release.exe");
+                    }
+                    else
+                    {
+                        output += "Going into Validation" + Environment.NewLine;
+                        SendEmailNotification(new SendEmailNotificationRequest
+                        {
+                            Subject = "New Validation Job - Tenneco OEAdmin CA.",
+                            MessageBody = "Hi User <br/>, " +
+                            "You have a new job waiting to validate and process manually. Please <a href=''>Click Here</a> to open the job"
+                        });
+                    }
+
+                }
+                else if (oWorkflowData.CurrentModule.Name == "Export")
+                {
+
+                }
+
+                string logFilePath = @"C:\test\" + DateTime.Now.ToString("dd-MM-yyyy") + ".txt";
+                System.IO.File.AppendAllText(logFilePath, output);
+            }
+            catch (Exception ex)
+            {
+                System.IO.File.AppendAllText(@"C:\test\error.txt", ex.GetBaseException().ToString() + Environment.NewLine + Environment.NewLine + output);
+            }
+        }
+
+        public bool ValidateClassification(ref Kofax.ACWFLib.ACWorkflowData oWorkflowData)
+        {
+            bool skipDocumentReview = true;
+            ACDataElement root = oWorkflowData.ExtractRuntimeACDataElement(0);
+            ACDataElement oBatch = root.FindChildElementByName("Batch");
+            ACDataElement oDocuments = oBatch.FindChildElementByName("Documents");
+            ACDataElementCollection oDocCol = oDocuments.FindChildElementsByName("Document");
+            foreach (ACDataElement oDoc in oDocCol)
+            {
+                ACDataElement oPages = oDoc.FindChildElementByName("Pages");
+                ACDataElementCollection oPagesCol = oPages.FindChildElementsByName("Page");
+                string fileName = oPagesCol[1]["OriginalFileName"].ToString();
+                ACDataElement oIndexes = oDoc.FindChildElementByName("IndexFields");
+                ACDataElementCollection oIndexesCol = oIndexes.FindChildElementsByName("IndexField");
+                foreach (ACDataElement oIndex in oIndexesCol)
+                {
+                    if (oIndex["Name"] == "Classification Result")
+                    {
+                        if (Convert.ToInt32(oIndex["Confidence"]) >= 80)
+                        {
+                            output += "Classification Confidence is: " + oIndex["Confidence"] + Environment.NewLine;
+                            break;
+                        }
+                        else
+                        {
+                            skipDocumentReview = false;
+                            break;
+                        }
+                    }
+                }
+                break;
+            }
+            output += "Validate Classification Completed" + Environment.NewLine;
+            output += "=====================================================================" + Environment.NewLine;
+            return skipDocumentReview;
+        }
+
+        public bool ValidateExtraction(ref Kofax.ACWFLib.ACWorkflowData oWorkflowData)
+        {
+            ACDataElement root = oWorkflowData.ExtractRuntimeACDataElement(0);
+            ACDataElement oBatch = root.FindChildElementByName("Batch");
+            ACDataElement oDocuments = oBatch.FindChildElementByName("Documents");
+            ACDataElementCollection oDocCol = oDocuments.FindChildElementsByName("Document");
+
+            bool skipValidation = false;
+
+            foreach (ACDataElement oDoc in oDocCol)
+            {
+                ACDataElement oPages = oDoc.FindChildElementByName("Pages");
+                //output += "Found Pages" + Environment.NewLine;
+                ACDataElementCollection oPagesCol = oPages.FindChildElementsByName("Page");
+                string fileName = oPagesCol[1]["OriginalFileName"].ToString();
+                ACDataElement oIndexes = oDoc.FindChildElementByName("IndexFields");
+                ACDataElementCollection oIndexesCol = oIndexes.FindChildElementsByName("IndexField");
+
+                ACDataElement oPart1 = oIndexes.FindChildElementByAttribute("IndexField", "Name", "FileName");
+                if (oPart1 != null)
+                    oPart1["Value"] = fileName;
+                //output += "File Name is: " + fileName + Environment.NewLine;
+                var documentFields = new List<Fields>();
+                string ruleFieldValue = string.Empty;
+                foreach (ACDataElement oIndex in oIndexesCol)
+                {
+                    if (oIndex["Name"] != "Rule")
+                        documentFields.Add(new Fields() { Name = oIndex["Name"], Value = oIndex["Value"], Confidence = Convert.ToInt32(oIndex["Confidence"]) });
+
+                    if (oIndex["Name"] == "Rule")
+                        ruleFieldValue = oIndex["Value"];
+                    output += oIndex["Name"] + ":" + oIndex["Value"] + ":" + oIndex["Confidence"] + Environment.NewLine;
+                }
+                output += "Got All the Header Fields" + Environment.NewLine;
+                if (!System.IO.File.Exists(@"D:\Kofax\Transformation\TennecoCA\HeaderFields\" + ruleFieldValue + ".txt"))
+                {
+                    skipValidation = false;
+                    goto Skip;
+                }
+                if (documentFields.Where(o => o.Name == "SkipValidation").Count() == 0)
+                {
+                    skipValidation = true;
+                    output += "Document does not contain SkipValidation Field. Document will be moved to Export" + Environment.NewLine;
+                    goto Skip;
+                }
+                output += "Found Required Header Fields" + Environment.NewLine;
+                List<string> requiredFields = System.IO.File.ReadAllLines(@"D:\Kofax\Transformation\TennecoCA\HeaderFields\" + ruleFieldValue + ".txt").Select(o => { return o.ToLower(); }).ToList();
+                skipValidation = documentFields.Where(o => requiredFields.Contains(o.Name.ToLower()) && o.Confidence < 70).Count() == 0;
+                output += "Skip Validation For Header: " + skipValidation + Environment.NewLine;
+                if (skipValidation)
+                {
+                    skipValidation = documentFields.Where(o => o.Name == "SkipValidation" && o.Value == "False").Count() == 0;
+                    output += "Skip Validation For LineItems: " + skipValidation + Environment.NewLine;
+                }
+
+            }
+            output += "Validation Completed" + Environment.NewLine;
+            output += "=====================================================================" + Environment.NewLine;
+
+
+        Skip:
+            return skipValidation;
+        }
+
+        public void SetNextModule(ref Kofax.ACWFLib.ACWorkflowData oWorkflowData, string moduleName)
+        {
+            ACWorkflowModules oPossibleModules2 = oWorkflowData.PossibleModules;
+            foreach (ACWorkflowModule oModule2 in oPossibleModules2)
+            {
+                output += oModule2.ID + ":" + oModule2.Name + Environment.NewLine;
+                if (oModule2.ID.ToLower() == moduleName.ToLower())
+                {
+                    ACWorkflowModule tMod = oModule2;
+                    oWorkflowData.set_NextModule(ref tMod);
+                    break;
+                }
+                Marshal.ReleaseComObject(oModule2);
+            }
+
+            ACDataElement root = oWorkflowData.ExtractRuntimeACDataElement(0);
+            ACDataElement oBatch = root.FindChildElementByName("Batch");
+            ACDataElement oDocuments = oBatch.FindChildElementByName("Documents");
+            ACDataElementCollection oDocCol = oDocuments.FindChildElementsByName("Document");
+            GC.KeepAlive(oDocCol);
+        }
+
+        public bool SendEmailNotification(SendEmailNotificationRequest emailRequest)
+        {
+            try
+            {
+                emailRequest = SetEmailNotificationRequest(emailRequest);
+                using (SmtpClient SmtpServer = new SmtpClient(emailRequest.SMTP))
+                {
+                    SmtpServer.Port = Convert.ToInt32(emailRequest.PortNo);
+                    SmtpServer.Credentials = new System.Net.NetworkCredential(emailRequest.UserName, emailRequest.Password);
+                    var mail = new MailMessage
+                    {
+                        From = new MailAddress(emailRequest.UserName),
+                        IsBodyHtml = emailRequest.IsHtml
+                    };
+                    mail.To.Add(emailRequest.ToEmail);
+                    mail.Subject = emailRequest.Subject;
+                    mail.Body = emailRequest.MessageBody;                    
+                    SmtpServer.Send(mail);
+                    output += string.Format("Email has been sent with Subject: {0} to {1}", mail.Subject, emailRequest.ToEmail) + Environment.NewLine;
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                output += "Error while sending email with Exception: "+ ex.GetBaseException() + "" + Environment.NewLine;
+                return false;
+                //throw new Exception("Error in Sending Email", ex);
+            }
+        }
+
+        public SendEmailNotificationRequest SetEmailNotificationRequest(SendEmailNotificationRequest emailRequest)
+        {            
+            try
+            {
+                OdbcConnection DbConnection = new OdbcConnection("DSN=TennecoOEAdminCA");
+                DbConnection.Open();
+                OdbcCommand DbCommand = DbConnection.CreateCommand();
+                DbCommand.CommandText = "SELECT * FROM Configuration";
+                OdbcDataReader DbReader = DbCommand.ExecuteReader();
+                int fCount = DbReader.FieldCount;
+                while (DbReader.Read())
+                {
+                    Console.Write(":");
+                    for (int i = 0; i < fCount; i++)
+                    {
+                        String col = DbReader.GetString(i);
+                        switch (col)
+                        {
+                            case "UserName":
+                                emailRequest.UserName = DbReader.GetValue(i).ToString();
+                                break;
+                            case "Password":
+                                emailRequest.Password = DbReader.GetValue(i).ToString();
+                                break;
+                            case "SMTP":
+                                emailRequest.SMTP = DbReader.GetValue(i).ToString();
+                                break;
+                            case "Port":
+                                emailRequest.PortNo = Convert.ToInt32(DbReader.GetValue(i));
+                                break;
+                            case "EmailTo":
+                                emailRequest.ToEmail = DbReader.GetValue(i).ToString();
+                                break;
+                            case "EmailFrom":
+                                emailRequest.ToEmail = DbReader.GetValue(i).ToString();
+                                break;
+                            default:
+                                break;
+                        }
+
+                    }
+
+                }
+                DbReader.Close();
+                DbCommand.Dispose();
+                DbConnection.Close();                
+            }
+            catch (OdbcException ex)
+            {
+                Console.WriteLine("connection to the DSN failed.");
+                Console.WriteLine("The OdbcConnection returned the following message");
+                Console.WriteLine(ex.Message);
+                output += "Error getting data from DB"+ Environment.NewLine;
+            }
+            return emailRequest;
+        }
+
+        public class Fields
+        {
+            public string Name { get; set; }
+            public string Value { get; set; }
+            public int Confidence { get; set; }
+            public bool IsValid { get; set; }
+        }
+
+        public class SendEmailNotificationRequest
+        {
+            public string MessageBody { get; set; }
+            public string Subject { get; set; }            
+            public bool IsHtml { get; set; }
+
+            public string UserName { get; set; }
+            public string Password { get; set; }
+            public int PortNo { get; set; }
+            public string SMTP { get; set; }
+
+            public string ToEmail { get; set; }
+            public string FromEmail { get; set; }
+        }
+    }
+}
